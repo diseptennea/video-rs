@@ -3,6 +3,9 @@ extern crate ffmpeg_next as ffmpeg;
 #[cfg(feature = "ndarray")]
 use ndarray::Array3;
 
+#[cfg(feature = "burn")]
+use burn::tensor::{Int, Tensor, backend::Backend};
+
 use ffmpeg::codec::codec::Codec;
 use ffmpeg::codec::context::Context;
 use ffmpeg::encoder::video::Video;
@@ -10,7 +13,7 @@ use ffmpeg::format::context::Output;
 use ffmpeg::util::frame::video::Video as Frame;
 use ffmpeg::{Error, Rational};
 
-#[cfg(feature = "ndarray")]
+// #[cfg(any(feature = "burn", feature = "ndarray"))]
 use ffmpeg::util::format::Pixel;
 
 use ffmpeg::ffi::*;
@@ -258,6 +261,63 @@ pub fn copy_frame_props(src: &Frame, dst: &mut Frame) {
 /// C)` and type byte.
 #[cfg(feature = "ndarray")]
 pub type FrameArray = Array3<u8>;
+
+/// Converts an [`burn::tensor::Tensor`] to an RGB24 video `AVFrame` for ffmpeg.
+///
+/// # Arguments
+///
+/// * `frame_tensor` - Video frame to convert. The frame format must be `(H, W, C)`.
+///
+/// # Return value
+///
+/// An ffmpeg-native `AvFrame`.
+#[cfg(feature = "burn")]
+pub fn convert_burn_to_frame_rgb24<B: Backend>(frame_tensor: &Tensor<B, 3, Int>) -> Result<Frame, Error> {
+    unsafe {
+        // TODO: assert!(frame_array.is_standard_layout());
+        // How to rewrite this line for burn::tensor::Tensor? (assuming Burn uses C contiguous layout)
+
+        let [frame_height, frame_width, _] = frame_tensor.dims();
+        let frame_array = frame_tensor.to_data().convert::<u8>();
+
+        // Temporary frame structure to place correctly formatted data and linesize stuff in, which
+        // we'll copy later.
+        let mut frame_tmp = Frame::empty();
+        let frame_tmp_ptr = frame_tmp.as_mut_ptr();
+
+        // This does not copy the data, but it sets the `frame_tmp` data and linesize pointers
+        // correctly.
+        let bytes_copied = av_image_fill_arrays(
+            (*frame_tmp_ptr).data.as_ptr() as *mut *mut u8,
+            (*frame_tmp_ptr).linesize.as_ptr() as *mut i32,
+            frame_array.value.as_ptr(),
+            AVPixelFormat::AV_PIX_FMT_RGB24,
+            frame_width as i32,
+            frame_height as i32,
+            1,
+        );
+
+        if bytes_copied != frame_array.value.len() as i32 {
+            return Err(Error::from(bytes_copied));
+        }
+
+        let mut frame = Frame::new(Pixel::RGB24, frame_width as u32, frame_height as u32);
+        let frame_ptr = frame.as_mut_ptr();
+
+        // Do the actual copying.
+        av_image_copy(
+            (*frame_ptr).data.as_ptr() as *mut *mut u8,
+            (*frame_ptr).linesize.as_ptr() as *mut i32,
+            (*frame_tmp_ptr).data.as_ptr() as *mut *const u8,
+            (*frame_tmp_ptr).linesize.as_ptr(),
+            AVPixelFormat::AV_PIX_FMT_RGB24,
+            frame_width as i32,
+            frame_height as i32,
+        );
+
+        Ok(frame)
+    }
+}
 
 /// Converts an `ndarray` to an RGB24 video `AVFrame` for ffmpeg.
 ///
